@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.utils.data.sampler import *
-
+import numpy as np
 
 # Trick 8: orthogonal initialization
 def orthogonal_init(layer, gain=1.0):
@@ -108,11 +108,13 @@ class Critic_MLP(nn.Module):
         return value
 
 
-class MAPPO_MPE:
+class MAPPO:
     def __init__(self, args):
         self.N = args.N
         self.action_dim = args.action_dim
+        self.action_dim_IRS = args.action_dim_n[3]  # action_dim of IRS
         self.obs_dim = args.obs_dim
+        self.obs_dim_IRS = args.obs_dim_n[3]  # obs_dim of IRS
         self.state_dim = args.state_dim
         self.episode_limit = args.episode_limit
         self.rnn_hidden_dim = args.rnn_hidden_dim
@@ -136,6 +138,7 @@ class MAPPO_MPE:
 
         # get the input dimension of actor and critic
         self.actor_input_dim = args.obs_dim
+        self.actor_input_dim_IRS = args.obs_dim_n[3]  # actor_input_dim of IRS
         self.critic_input_dim = args.state_dim
         if self.add_agent_id:
             print("------add agent id------")
@@ -146,21 +149,24 @@ class MAPPO_MPE:
             print("------use rnn------")
             self.actor = Actor_RNN(args, self.actor_input_dim)
             self.critic = Critic_RNN(args, self.critic_input_dim)
+            self.actor_IRS = Actor_RNN(args, self.actor_input_dim_IRS)
         else:
             self.actor = Actor_MLP(args, self.actor_input_dim)
             self.critic = Critic_MLP(args, self.critic_input_dim)
+            self.actor_IRS = Actor_MLP(args, self.actor_input_dim_IRS)
 
-        self.ac_parameters = list(self.actor.parameters()) + list(self.critic.parameters())
+        self.ac_parameters = list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.actor_IRS.parameters())
         if self.set_adam_eps:
             print("------set adam eps------")
             self.ac_optimizer = torch.optim.Adam(self.ac_parameters, lr=self.lr, eps=1e-5)
         else:
             self.ac_optimizer = torch.optim.Adam(self.ac_parameters, lr=self.lr)
 
-    def choose_action(self, obs_n, evaluate):
+    def choose_action(self, obs_n_full, evaluate):
         with torch.no_grad():
             actor_inputs = []
-            obs_n = torch.tensor(obs_n, dtype=torch.float32)  # obs_n.shape=(N，obs_dim)
+            obs_n = torch.tensor(obs_n_full[:-1], dtype=torch.float32)  # obs_n.shape=(N，obs_dim)
+            obs_IRS = torch.tensor(obs_n_full[-1], dtype=torch.float32)  # obs_IRS.shape=(obs_dim_IRS,)
             actor_inputs.append(obs_n)
             if self.add_agent_id:
                 """
@@ -175,6 +181,8 @@ class MAPPO_MPE:
 
             actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_input.shape=(N, actor_input_dim)
             prob = self.actor(actor_inputs)  # prob.shape=(N,action_dim)
+            prob_IRS = self.actor_IRS(obs_IRS.unsqueeze(0))  # prob_IRS.shape=(1, action_dim_IRS)
+            prob = torch.cat((prob, prob_IRS), dim=0)  # prob.shape=(N+1, action_dim)  # The last one is the prob of IRS
             if evaluate:  # When evaluating the policy, we select the action with the highest probability
                 a_n = prob.argmax(dim=-1)
                 return a_n.numpy(), None
@@ -217,7 +225,7 @@ class MAPPO_MPE:
             actor_inputs.shape=(batch_size, max_episode_len, N, actor_input_dim)
             critic_inputs.shape=(batch_size, max_episode_len, N, critic_input_dim)
         """
-        actor_inputs, critic_inputs = self.get_inputs(batch)
+        actor_inputs, critic_inputs, actor_inputs_IRS = self.get_inputs(batch)
 
         # Optimize policy for K epochs:
         for _ in range(self.K_epochs):
@@ -242,6 +250,8 @@ class MAPPO_MPE:
                     values_now = torch.stack(values_now, dim=1)
                 else:
                     probs_now = self.actor(actor_inputs[index])
+                    probs_IRS_now = self.actor_IRS(actor_inputs_IRS[index])  # probs_IRS_now.shape=(mini_batch_size, action_dim_IRS)
+                    probs_now = torch.cat((probs_now, probs_IRS_now), dim=2)  # probs_now.shape=(mini_batch_size, episode_limit, N+1, action_dim)  # The last one is the prob of IRS
                     values_now = self.critic(critic_inputs[index]).squeeze(-1)
 
                 dist_now = Categorical(probs_now)
@@ -278,8 +288,9 @@ class MAPPO_MPE:
             p['lr'] = lr_now
 
     def get_inputs(self, batch):
-        actor_inputs, critic_inputs = [], []
+        actor_inputs, critic_inputs, actor_inputs_IRS = [], [], []
         actor_inputs.append(batch['obs_n'])
+        actor_inputs_IRS.append(batch['obs_n_IRS'])  # obs_n_IRS.shape=(batch_size, episode_limit, 1, obs_dim_IRS) --> (batch_size, episode_limit, obs_dim_IRS)
         critic_inputs.append(batch['s'].unsqueeze(2).repeat(1, 1, self.N, 1))
         if self.add_agent_id:
             # agent_id_one_hot.shape=(mini_batch_size, max_episode_len, N, N)
@@ -288,11 +299,13 @@ class MAPPO_MPE:
             critic_inputs.append(agent_id_one_hot)
 
         actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_inputs.shape=(batch_size, episode_limit, N, actor_input_dim)
+        actor_inputs_IRS = torch.cat([x for x in actor_inputs_IRS], dim=-1)  # actor_inputs_IRS.shape=(batch_size, episode_limit, N, actor_input_dim_IRS)
         critic_inputs = torch.cat([x for x in critic_inputs], dim=-1)  # critic_inputs.shape=(batch_size, episode_limit, N, critic_input_dim)
-        return actor_inputs, critic_inputs
 
-    def save_model(self, env_name, number, seed, total_steps):
-        torch.save(self.actor.state_dict(), "./model/MAPPO_actor_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, int(total_steps / 1000)))
+        return actor_inputs, critic_inputs, actor_inputs_IRS
 
-    def load_model(self, env_name, number, seed, step):
-        self.actor.load_state_dict(torch.load("./model/MAPPO_actor_env_{}_number_{}_seed_{}_step_{}k.pth".format(env_name, number, seed, step)))
+    def save_model(self, env_name, number, consider_cloud, total_steps):
+        torch.save(self.actor.state_dict(), "./for_saving_model/MAPPO_actor_env_{}_number_{}_consider_cloud_{}_step_{}k.pth".format(env_name, number, consider_cloud, int(total_steps / 1000)))
+
+    def load_model(self, env_name, number, consider_cloud):
+        self.actor.load_state_dict(torch.load("./model/MAPPO_actor_env_{}_number_{}_consider_cloud_{}.pth".format(env_name, number, consider_cloud)))
