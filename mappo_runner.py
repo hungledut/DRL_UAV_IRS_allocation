@@ -16,16 +16,17 @@ class Runner_MAPPO:
         self.seed = seed
         self.testing = testing
         # Set random seed
-        # np.random.seed(self.seed)
-        # torch.manual_seed(self.seed)
+        if testing == True:
+            np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
         # Create env
         self.env = IRS_env() # Discrete action space
 
         self.env.max_step = self.args.episode_limit # Set the max length of an episode
         print("max_step in testing:", self.env.max_step) 
         self.args.N = 4  # The number of agents
-        self.args.obs_dim_n = [309, 309, 309, 9]  # obs dimensions of N agents
-        self.args.action_dim_n = [5, 5, 5, 6]  # actions dimensions of N agents
+        self.args.obs_dim_n = [310, 310, 310, 218]  # obs dimensions of N agents
+        self.args.action_dim_n = [5, 5, 5, 7]  # actions dimensions of N agents
         # Only for homogenous agents environments like Spread in MPE,all agents have the same dimension of observation space and action space
         self.args.obs_dim = self.args.obs_dim_n[0]  # The dimensions of an agent's observation space
         self.args.action_dim = self.args.action_dim_n[0]  # The dimensions of an agent's action space
@@ -96,7 +97,9 @@ class Runner_MAPPO:
         l_t_2 = 0
         w = 0.6
 
-        percentage_users = []
+        percentage_users_UAV0 = []
+        percentage_users_UAV1 = []
+        percentage_users_UAV2 = []
 
         if self.args.use_reward_scaling:
             self.reward_scaling.reset()
@@ -162,11 +165,12 @@ class Runner_MAPPO:
 
             obs_n = obs_next_n
             if self.testing == True:
-                if episode_step%2 == 0:
+                if episode_step%20 == 0:
                     self.env.plot()
                     print("IRS allocation of ", np.sum(self.env.irs) ,"=", self.env.irs)
-                percentage_users.append(S)  # Total number of users = 400
-                
+                percentage_users_UAV0.append(N_UAV0)  # Total number of users = 400
+                percentage_users_UAV1.append(N_UAV1)  # Total number of users = 400
+                percentage_users_UAV2.append(N_UAV2)  # Total number of users = 400
             if all(done_n):
                 break
 
@@ -177,8 +181,10 @@ class Runner_MAPPO:
             self.replay_buffer.store_last_value(episode_step + 1, v_n)
 
         if self.testing == True:
-            print("The number of users served in this episode: {}".format(percentage_users[-1]))
-            np.save('percentage_users.npy', np.array(percentage_users))
+            print("The number of users served in this episode: {}".format(percentage_users_UAV0[-1]))
+            np.save('percentage_users_UAV0.npy', np.array(percentage_users_UAV0))
+            np.save('percentage_users_UAV1.npy', np.array(percentage_users_UAV1))
+            np.save('percentage_users_UAV2.npy', np.array(percentage_users_UAV2))
 
 
         return episode_reward, episode_step + 1

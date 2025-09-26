@@ -62,6 +62,7 @@ class Critic_RNN(nn.Module):
         value = self.fc2(self.rnn_hidden)
         return value
 
+##################################################################################
 
 class Actor_MLP(nn.Module):
     def __init__(self, args, actor_input_dim):
@@ -85,6 +86,27 @@ class Actor_MLP(nn.Module):
         prob = torch.softmax(self.fc3(x), dim=-1)
         return prob
 
+class Actor_MLP_IRS(nn.Module):
+    def __init__(self, args, actor_input_dim):
+        super(Actor_MLP_IRS, self).__init__()
+        self.fc1 = nn.Linear(actor_input_dim, args.mlp_hidden_dim)
+        self.fc2 = nn.Linear(args.mlp_hidden_dim, args.mlp_hidden_dim)
+        self.fc3 = nn.Linear(args.mlp_hidden_dim, args.action_dim_n[3])
+        self.activate_func = [nn.Tanh(), nn.ReLU()][args.use_relu]
+
+        if args.use_orthogonal_init:
+            print("------use_orthogonal_init------")
+            orthogonal_init(self.fc1)
+            orthogonal_init(self.fc2)
+            orthogonal_init(self.fc3, gain=0.01)
+
+    def forward(self, actor_input):
+        # When 'choose_action': actor_input.shape=(N, actor_input_dim), prob.shape=(N, action_dim)
+        # When 'train':         actor_input.shape=(mini_batch_size, episode_limit, N, actor_input_dim), prob.shape(mini_batch_size, episode_limit, N, action_dim)
+        x = self.activate_func(self.fc1(actor_input))
+        x = self.activate_func(self.fc2(x))
+        prob = torch.softmax(self.fc3(x), dim=-1)
+        return prob
 
 class Critic_MLP(nn.Module):
     def __init__(self, args, critic_input_dim):
@@ -149,11 +171,11 @@ class MAPPO:
             print("------use rnn------")
             self.actor = Actor_RNN(args, self.actor_input_dim)
             self.critic = Critic_RNN(args, self.critic_input_dim)
-            self.actor_IRS = Actor_RNN(args, self.actor_input_dim_IRS)
+            self.actor_IRS = Actor_MLP_IRS(args, self.actor_input_dim_IRS)
         else:
             self.actor = Actor_MLP(args, self.actor_input_dim)
             self.critic = Critic_MLP(args, self.critic_input_dim)
-            self.actor_IRS = Actor_MLP(args, self.actor_input_dim_IRS)
+            self.actor_IRS = Actor_MLP_IRS(args, self.actor_input_dim_IRS)
 
         self.ac_parameters = list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.actor_IRS.parameters())
         if self.set_adam_eps:
@@ -182,15 +204,22 @@ class MAPPO:
             actor_inputs = torch.cat([x for x in actor_inputs], dim=-1)  # actor_input.shape=(N, actor_input_dim)
             prob = self.actor(actor_inputs)  # prob.shape=(N,action_dim)
             prob_IRS = self.actor_IRS(obs_IRS.unsqueeze(0))  # prob_IRS.shape=(1, action_dim_IRS)
-            prob = torch.cat((prob, prob_IRS), dim=0)  # prob.shape=(N+1, action_dim)  # The last one is the prob of IRS
+            # prob = torch.cat((prob, prob_IRS), dim=0)  # prob.shape=(N+1, action_dim)  # The last one is the prob of IRS
             if evaluate:  # When evaluating the policy, we select the action with the highest probability
                 a_n = prob.argmax(dim=-1)
-                return a_n.numpy(), None
+                a_IRS = prob_IRS.argmax(dim=-1)
+                actions = np.concatenate((a_n.numpy(), a_IRS.numpy()), axis=0)
+                return actions, None
             else:
                 dist = Categorical(probs=prob)
+                dist_IRS = Categorical(probs=prob_IRS)
                 a_n = dist.sample()
+                a_IRS = dist_IRS.sample()
                 a_logprob_n = dist.log_prob(a_n)
-                return a_n.numpy(), a_logprob_n.numpy()
+                a_logprob_IRS = dist_IRS.log_prob(a_IRS)
+                actions = np.concatenate((a_n.numpy(), a_IRS.numpy()), axis=0)
+                a_logprob = torch.cat((a_logprob_n, a_logprob_IRS), dim=0)
+                return actions, a_logprob.numpy()
 
     def get_value(self, s):
         with torch.no_grad():
@@ -251,13 +280,21 @@ class MAPPO:
                 else:
                     probs_now = self.actor(actor_inputs[index])
                     probs_IRS_now = self.actor_IRS(actor_inputs_IRS[index])  # probs_IRS_now.shape=(mini_batch_size, action_dim_IRS)
-                    probs_now = torch.cat((probs_now, probs_IRS_now), dim=2)  # probs_now.shape=(mini_batch_size, episode_limit, N+1, action_dim)  # The last one is the prob of IRS
+                    # probs_now = torch.cat((probs_now, probs_IRS_now), dim=2)  # probs_now.shape=(mini_batch_size, episode_limit, N+1, action_dim)  # The last one is the prob of IRS
+                    # print(probs_IRS_now.shape)
                     values_now = self.critic(critic_inputs[index]).squeeze(-1)
 
                 dist_now = Categorical(probs_now)
+                dist_now_IRS = Categorical(probs_IRS_now)
+
                 dist_entropy = dist_now.entropy()  # dist_entropy.shape=(mini_batch_size, episode_limit, N)
+                dist_entropy_IRS = dist_now_IRS.entropy()  # dist_entropy_IRS.shape=(mini_batch_size)
+
+                dist_entropy = torch.cat((dist_entropy, dist_entropy_IRS), dim=2)  # dist_entropy.shape=(mini_batch_size, episode_limit, N+1)
                 # batch['a_n'][index].shape=(mini_batch_size, episode_limit, N)
-                a_logprob_n_now = dist_now.log_prob(batch['a_n'][index])  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N)
+                a_logprob_n_now = dist_now.log_prob(batch['a_n'][index, :, :-1])  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N)
+                a_logprob_IRS_now = dist_now_IRS.log_prob(batch['a_n'][index, :, -1:])  # a_logprob_IRS_now.shape=(mini_batch_size, episode_limit)
+                a_logprob_n_now = torch.cat((a_logprob_n_now, a_logprob_IRS_now), dim=2)  # a_logprob_n_now.shape=(mini_batch_size, episode_limit, N+1)
                 # a/b=exp(log(a)-log(b))
                 ratios = torch.exp(a_logprob_n_now - batch['a_logprob_n'][index].detach())  # ratios.shape=(mini_batch_size, episode_limit, N)
                 surr1 = ratios * adv[index]
@@ -306,6 +343,8 @@ class MAPPO:
 
     def save_model(self, env_name, number, consider_cloud, total_steps):
         torch.save(self.actor.state_dict(), "./for_saving_model/MAPPO_actor_env_{}_number_{}_consider_cloud_{}_step_{}k.pth".format(env_name, number, consider_cloud, int(total_steps / 1000)))
+        torch.save(self.actor_IRS.state_dict(), "./for_saving_model/MAPPO_actor_IRS_env_{}_number_{}_consider_cloud_{}_step_{}k.pth".format(env_name, number, consider_cloud, int(total_steps / 1000)))
 
     def load_model(self, env_name, number, consider_cloud):
         self.actor.load_state_dict(torch.load("./model/MAPPO_actor_env_{}_number_{}_consider_cloud_{}.pth".format(env_name, number, consider_cloud)))
+        self.actor_IRS.load_state_dict(torch.load("./model/MAPPO_actor_IRS_env_{}_number_{}_consider_cloud_{}.pth".format(env_name, number, consider_cloud)))

@@ -35,18 +35,18 @@ class IRS_env(gym.Env):
         tau = 1,
         ##### FSO ######
         noise_power_FSO = 1e-7, # (W)
-        P_FSO = 1, # (W)
+        P_FSO = 3, # (W)
         B_FSO = 1e9, # (Hz)
         noise_power = 1e-14, # (W)
         P_UAV = 10, # (W) -> 
         B_RF = 20e6, # (Hz) 
         r_th = 100e6, # (bps) ~ 20Mbps
-        max_step = 900,
+        max_step = 1000,
         grid_num = 10,
         ###### Cloud ######
         Nc = 250, # (cm^-3)
         Hcl = 2e3, # (km)
-        cloud_moving_step = 15, #
+        cloud_moving_step = 3, #
         ####### Train or Test ? #######
         test = False,
         ###### Gauss-Markov Mobility Model for User Moving #########
@@ -335,6 +335,8 @@ class IRS_env(gym.Env):
         elif actions[3] == 5 and self.irs[2] > irs_element_area: # allocate from UAV2 to UAV1
             self.irs[2] -= irs_element_area
             self.irs[1] += irs_element_area
+        elif actions[3] == 6: # keep unchanged
+            self.irs = self.irs
 
         ####################################### UAV behavior ##########################################################
         self.UAV0_behavior[:,self.step_] = self.uavs_location[:,0]
@@ -441,9 +443,9 @@ class IRS_env(gym.Env):
                 self.heatmap_users_unsatisfied[x,y] += 1
         ##############################################################################
 
-        State_0 = np.array([self.C_FSO[0]/(1e9),np.sum(self.satisfied_users),self.irs[0]])
-        State_1 = np.array([self.C_FSO[1]/(1e9),np.sum(self.satisfied_users),self.irs[1]])
-        State_2 = np.array([self.C_FSO[2]/(1e9),np.sum(self.satisfied_users),self.irs[2]])
+        State_0 = np.array([self.C_FSO[0]/(1e9),np.sum(self.satisfied_users),self.irs[0],actions[3]])
+        State_1 = np.array([self.C_FSO[1]/(1e9),np.sum(self.satisfied_users),self.irs[1],actions[3]])
+        State_2 = np.array([self.C_FSO[2]/(1e9),np.sum(self.satisfied_users),self.irs[2],actions[3]])
 
         O_UAV0 = np.concatenate((self.uavs_location[:,0],self.uavs_location[:,1],self.uavs_location[:,2],np.reshape(self.heatmap_users_unsatisfied,self.grid_num**2),np.reshape(self.heatmap_UAV0,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2),State_0)) #,np.reshape(self.heatmap_CLWC(),10**2)
         O_UAV1 = np.concatenate((self.uavs_location[:,1],self.uavs_location[:,2],self.uavs_location[:,0],np.reshape(self.heatmap_users_unsatisfied,self.grid_num**2),np.reshape(self.heatmap_UAV1,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2),State_1))
@@ -459,8 +461,8 @@ class IRS_env(gym.Env):
         self.S_UAV1 = np.sum(connect_tem[1,:]*self.satisfied_users)
         self.S_UAV2 = np.sum(connect_tem[2,:]*self.satisfied_users)
 
-        arr_supported_users = np.array([self.S_UAV0,self.S_UAV1,self.S_UAV2])
-        O_IRS = np.concatenate((self.C_FSO,arr_supported_users,self.irs))
+        arr_supported_users = np.array([self.S_UAV0,self.S_UAV1,self.S_UAV2,self.N_UAV0,self.N_UAV1,self.N_UAV2])
+        O_IRS = np.concatenate((self.C_FSO/(1e9),arr_supported_users,self.irs,self.uavs_location[:,0],self.uavs_location[:,1],self.uavs_location[:,2],np.reshape(self.heatmap_users,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2)))
 
         return [O_UAV0, O_UAV1, O_UAV2, O_IRS], S, self.S_UAV0, self.S_UAV1, self.S_UAV2 , [False, False, False, False], False # O_UAV0, O_UAV1, O_UAV2, self.CLWC, S, self.S_UAV0, self.S_UAV1, self.S_UAV2, self.C_FSO/(1e9)
     def power_allocation(self,gain_UAV):
@@ -589,7 +591,6 @@ class IRS_env(gym.Env):
         
     def reset(self):
         self.uavs_location = np.zeros((2, self.uavs))
-        self.irs =  np.zeros(self.uavs) + self.Lx/self.uavs * self.Ly # Initial IRS area for each UAV
         # np.random.seed(42)
         self.users_location = np.clip(np.random.normal(loc=1000, scale=400, size=(2, self.users)),0,1999)
         self.satisfied_users = np.zeros(self.users)
@@ -600,6 +601,7 @@ class IRS_env(gym.Env):
         self.heatmap_users = np.zeros((self.grid_num,self.grid_num))
         self.P_UAV = np.zeros(self.uavs) + 10
         self.update_zenith_angle_and_reflected_angle()
+
         ############ Heatmap #############################
         self.heatmap_UAV0 = np.zeros((self.grid_num,self.grid_num))
         self.heatmap_UAV1 = np.zeros((self.grid_num,self.grid_num))
@@ -625,20 +627,21 @@ class IRS_env(gym.Env):
         self.random_user_list = random.sample(list(range(self.users)), int(self.user_moving_percent*self.users))
 
         # S1, S2 = self.S_cal()
-        ################################# Geometric Loss ##############################
-        # geo_loss = self.geometric_loss()
+        ################################# Reset IRS Size (Equally divide IRS) ##############################
+        self.irs =  np.zeros(self.uavs) + self.Lx/self.uavs * self.Ly 
 
-        State_0 = np.array([self.C_FSO[0]/(1e9),np.sum(self.satisfied_users),self.irs[0]])
-        State_1 = np.array([self.C_FSO[1]/(1e9),np.sum(self.satisfied_users),self.irs[1]])
-        State_2 = np.array([self.C_FSO[2]/(1e9),np.sum(self.satisfied_users),self.irs[2]])
+
+        State_0 = np.array([self.C_FSO[0]/(1e9),np.sum(self.satisfied_users),self.irs[0],0])
+        State_1 = np.array([self.C_FSO[1]/(1e9),np.sum(self.satisfied_users),self.irs[1],0])
+        State_2 = np.array([self.C_FSO[2]/(1e9),np.sum(self.satisfied_users),self.irs[2],0])
 
         ####### Observations ######
         O_UAV0 = np.concatenate((self.uavs_location[:,0],self.uavs_location[:,1],self.uavs_location[:,2],np.reshape(self.heatmap_users_unsatisfied,self.grid_num**2),np.reshape(self.heatmap_UAV0,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2),State_0)) #,np.reshape(self.heatmap_CLWC(),10**2)
         O_UAV1 = np.concatenate((self.uavs_location[:,1],self.uavs_location[:,2],self.uavs_location[:,0],np.reshape(self.heatmap_users_unsatisfied,self.grid_num**2),np.reshape(self.heatmap_UAV1,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2),State_1))
         O_UAV2 = np.concatenate((self.uavs_location[:,2],self.uavs_location[:,0],self.uavs_location[:,1],np.reshape(self.heatmap_users_unsatisfied,self.grid_num**2),np.reshape(self.heatmap_UAV2,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2),State_2))
                 
-        arr_supported_users = np.array([self.S_UAV0,self.S_UAV1,self.S_UAV2])
-        O_IRS = np.concatenate((self.C_FSO,arr_supported_users,self.irs))
+        arr_supported_users = np.array([self.S_UAV0,self.S_UAV1,self.S_UAV2,self.N_UAV0,self.N_UAV1,self.N_UAV2])
+        O_IRS = np.concatenate((self.C_FSO/(1e9),arr_supported_users,self.irs,self.uavs_location[:,0],self.uavs_location[:,1],self.uavs_location[:,2],np.reshape(self.heatmap_users,self.grid_num**2),np.reshape(self.heatmap_CLWC(),10**2)))
         
         if self.test == True:
             return O_UAV0,O_UAV1,O_UAV2,self.CLWC
@@ -671,7 +674,7 @@ class IRS_env(gym.Env):
         plt.axvline(0, color='black', linewidth=0.5)
         plt.legend()
         plt.savefig("beamfootprint_at_IRS.png")
-    def generate_cloud_matrix(self,height, width, num_clouds=100, min_clwc=5, max_clwc=20):
+    def generate_cloud_matrix(self,height, width, num_clouds=500, min_clwc=5, max_clwc=50):
         clwc_matrix = np.zeros((height, width))
 
         for _ in range(num_clouds):
@@ -696,7 +699,7 @@ class IRS_env(gym.Env):
         # Chèn vào ma trận
             clwc_matrix[top:top+cloud_h, left:left+cloud_w] += cloud_patch
 
-        clwc_matrix = np.clip(clwc_matrix,1,20)
+        clwc_matrix = np.clip(clwc_matrix,1,50)
         return clwc_matrix
     def plot_cloud(self):
 

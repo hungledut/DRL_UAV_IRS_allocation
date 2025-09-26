@@ -9,6 +9,6 @@ import numpy as np
 if __name__ == '__main__':
 
     args = parse_args()
-    runner = Runner_MAPPO(args, env_name="UAV network", number=1, seed=300, testing = True) # default seed = 300
+    runner = Runner_MAPPO(args, env_name="UAV network", number=1, seed=30, testing = True) # default seed = 300
     runner.agent_n.load_model("UAV network","1",args.consider_cloud)
     runner.run_episode_mpe()
